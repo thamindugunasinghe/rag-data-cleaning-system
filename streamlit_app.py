@@ -6,9 +6,9 @@ import yaml
 import numpy as np
 from src.data_profiler import DataProfiler
 from src.cleaner import DataCleaner
-from src.utils import calculate_data_quality_score, export_to_csv
 import io
-import json
+import sys
+from io import StringIO
 
 # Page config
 st.set_page_config(
@@ -17,6 +17,19 @@ st.set_page_config(
     layout="wide"
 )
 
+# Capture print statements
+class StreamlitCapture:
+    def __init__(self):
+        self.logs = []
+    
+    def write(self, txt):
+        self.logs.append(txt)
+        if hasattr(st, 'session_state'):
+            st.session_state['debug_logs'] = self.logs
+
+    def flush(self):
+        pass
+
 # Load configuration
 @st.cache_data
 def load_config():
@@ -24,11 +37,10 @@ def load_config():
         with open('config.yaml', 'r') as f:
             return yaml.safe_load(f)
     except:
-        # Default config if file not found
         return {
             'cleaning_strategies': {
-                'quantitative': ["Mean Imputation", "Median Imputation", "Mode Imputation", "Forward Fill", "Backward Fill", "LLM Prediction"],
-                'qualitative': ["Mode Imputation", "LLM Context Prediction", "Forward Fill", "Backward Fill", "Remove Rows"]
+                'quantitative': ['Mean Imputation', 'Median Imputation', 'Mode Imputation'],
+                'qualitative': ['Mode Imputation', 'LLM Context Prediction']
             }
         }
 
@@ -51,10 +63,13 @@ def main():
     page = st.sidebar.selectbox("Choose a page", 
                                ["Data Upload & Profiling", "Cleaning Configuration", "Results & Download"])
     
+    # Debug toggle
+    show_debug = st.sidebar.checkbox("🐛 Show Debug Logs", value=False)
+    
     if page == "Data Upload & Profiling":
         data_upload_page()
     elif page == "Cleaning Configuration":
-        cleaning_config_page()
+        cleaning_config_page(show_debug)
     elif page == "Results & Download":
         results_page()
 
@@ -139,7 +154,7 @@ def display_data_profile(profile):
     fig.update_layout(xaxis_tickangle=-45)
     st.plotly_chart(fig, use_container_width=True)
 
-def cleaning_config_page():
+def cleaning_config_page(show_debug=False):
     st.header("⚙️ Cleaning Configuration")
     
     if 'original_df' not in st.session_state:
@@ -150,6 +165,14 @@ def cleaning_config_page():
     profile = st.session_state.get('profile', {})
     
     st.subheader("🔧 Configure Cleaning Strategies")
+    
+    # Warning for large datasets with LLM
+    total_issues = sum([profile.get('column_profiles', {}).get(col, {}).get('null_count', 0) + 
+                       profile.get('column_profiles', {}).get(col, {}).get('error_count', 0) 
+                       for col in df.columns])
+    
+    if total_issues > 1000:
+        st.warning(f"⚠️ Large dataset detected ({total_issues:,} issues). LLM predictions may take significant time and cost. Consider using statistical methods for large missing value counts.")
     
     cleaning_strategies = {}
     
@@ -177,6 +200,11 @@ def cleaning_config_page():
                 key=f"strategy_{column}"
             )
             cleaning_strategies[column] = strategy
+            
+            # Show warning for LLM with many missing values
+            issues = col_profile.get('null_count', 0) + col_profile.get('error_count', 0)
+            if 'LLM' in strategy and issues > 50:
+                st.caption(f"⚠️ {issues} missing values - will be limited to 50 LLM calls for performance")
         
         with col2:
             st.metric("Quality", f"{col_profile.get('data_quality', 0):.1f}%")
@@ -192,20 +220,72 @@ def cleaning_config_page():
     
     with col1:
         if st.button("🧹 Start Cleaning", type="primary", use_container_width=True):
-            with st.spinner("🔄 Cleaning data..."):
-                try:
+            
+            # Initialize session state for progress tracking
+            st.session_state['cleaning_progress'] = 0.0
+            st.session_state['llm_progress'] = 0.0
+            st.session_state['debug_logs'] = []
+            
+            # Create progress placeholders
+            progress_container = st.container()
+            debug_container = st.container()
+            
+            with progress_container:
+                st.write("🔄 **Cleaning Progress**")
+                main_progress = st.progress(0)
+                llm_progress = st.progress(0)
+                status_text = st.empty()
+            
+            # Debug logs container
+            if show_debug:
+                with debug_container:
+                    st.write("🐛 **Debug Logs**")
+                    debug_log = st.empty()
+            
+            # Redirect stdout to capture prints
+            old_stdout = sys.stdout
+            sys.stdout = StreamlitCapture()
+            
+            try:
+                with st.spinner("🔄 Cleaning data..."):
+                    
+                    # Update status
+                    status_text.text("Initializing cleaning process...")
+                    
+                    # Start cleaning
                     cleaned_df = cleaner.clean_dataset(df, cleaning_strategies)
                     st.session_state['cleaned_df'] = cleaned_df
                     st.session_state['cleaning_strategies'] = cleaning_strategies
+                    
+                    # Update progress
+                    main_progress.progress(0.8)
+                    status_text.text("Generating cleaning report...")
                     
                     # Generate report
                     report = cleaner.generate_cleaning_report(df, cleaned_df)
                     st.session_state['cleaning_report'] = report
                     
+                    # Complete
+                    main_progress.progress(1.0)
+                    llm_progress.progress(1.0)
+                    status_text.text("✅ Cleaning completed successfully!")
+                    
                     st.success("✅ Data cleaning completed!")
                     st.balloons()
-                except Exception as e:
-                    st.error(f"❌ Error during cleaning: {str(e)}")
+                    
+            except Exception as e:
+                st.error(f"❌ Error during cleaning: {str(e)}")
+                if show_debug:
+                    st.exception(e)
+            finally:
+                # Restore stdout
+                sys.stdout = old_stdout
+                
+                # Show debug logs
+                if show_debug and 'debug_logs' in st.session_state:
+                    with debug_container:
+                        debug_text = "\n".join(st.session_state['debug_logs'])
+                        debug_log.text_area("Debug Output", debug_text, height=300)
     
     with col2:
         if st.button("🔄 Reset to Recommended", use_container_width=True):
@@ -230,17 +310,13 @@ def results_page():
     with col1:
         st.write("**Original Dataset**")
         st.dataframe(original_df.head(), use_container_width=True)
-        orig_quality = calculate_data_quality_score(original_df)
-        st.metric("Overall Quality", f"{orig_quality:.1f}%")
         
     with col2:
         st.write("**Cleaned Dataset**")
         st.dataframe(cleaned_df.head(), use_container_width=True)
-        clean_quality = calculate_data_quality_score(cleaned_df)
-        st.metric("Overall Quality", f"{clean_quality:.1f}%")
     
     # Improvement metrics
-    if report and 'improvements' in report:
+    if report:
         st.subheader("📊 Quality Improvements")
         
         improvements_data = []
@@ -260,17 +336,17 @@ def results_page():
             go.Bar(name='Original', x=improvements_df['Column'], y=improvements_df['Original Quality (%)']),
             go.Bar(name='Cleaned', x=improvements_df['Column'], y=improvements_df['Final Quality (%)'])
         ])
-        fig.update_layout(barmode='group', title='Data Quality: Before vs After', xaxis_tickangle=-45)
+        fig.update_layout(barmode='group', title='Data Quality: Before vs After')
         st.plotly_chart(fig, use_container_width=True)
     
     # Download section
     st.subheader("💾 Download Results")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
     with col1:
         # Download cleaned dataset
-        csv = export_to_csv(cleaned_df)
+        csv = cleaned_df.to_csv(index=False)
         st.download_button(
             label="📥 Download Cleaned Dataset (CSV)",
             data=csv,
@@ -282,6 +358,7 @@ def results_page():
     with col2:
         # Download cleaning report
         if report:
+            import json
             report_json = json.dumps(report, indent=2, default=str)
             st.download_button(
                 label="📥 Download Cleaning Report (JSON)",
@@ -290,26 +367,6 @@ def results_page():
                 mime="application/json",
                 use_container_width=True
             )
-    
-    with col3:
-        # Download comparison report
-        comparison_data = {
-            'original_shape': original_df.shape,
-            'cleaned_shape': cleaned_df.shape,
-            'original_quality': orig_quality,
-            'cleaned_quality': clean_quality,
-            'improvement': clean_quality - orig_quality,
-            'strategies_used': st.session_state.get('cleaning_strategies', {})
-        }
-        
-        comparison_json = json.dumps(comparison_data, indent=2)
-        st.download_button(
-            label="📥 Download Summary Report (JSON)",
-            data=comparison_json,
-            file_name="summary_report.json",
-            mime="application/json",
-            use_container_width=True
-        )
 
 if __name__ == "__main__":
     main()
