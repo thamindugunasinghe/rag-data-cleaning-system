@@ -2,7 +2,7 @@
 llm:
   model: "gpt-3.5-turbo"
   temperature: 0.1
-  max_tokens: 500
+  max_tokens: 1000
 
 # Data Cleaning Strategies
 cleaning_strategies:

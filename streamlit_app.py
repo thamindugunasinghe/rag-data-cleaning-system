@@ -61,7 +61,10 @@ def main():
     # Sidebar for navigation
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox("Choose a page", 
-                               ["Data Upload & Profiling", "Cleaning Configuration", "Results & Download"])
+                               ["Data Upload & Profiling", 
+                            "Anomaly Detection", 
+                            "Cleaning Configuration", 
+                            "Results & Download"])
     
     # Debug toggle
     show_debug = st.sidebar.checkbox("🐛 Show Debug Logs", value=False)
