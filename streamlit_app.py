@@ -6,10 +6,12 @@ import yaml
 import numpy as np
 from src.data_profiler import DataProfiler
 from src.cleaner import DataCleaner
-from src.anomaly_detector import AnomalyDetector  # ← ADDED THIS
+from src.anomaly_detector import AnomalyDetector
 import io
 import sys
 from io import StringIO
+from scipy import stats
+import json
 
 # Page config
 st.set_page_config(
@@ -47,14 +49,14 @@ def load_config():
 
 config = load_config()
 
-# Initialize components - UPDATED THIS
+# Initialize components
 @st.cache_resource
 def get_components():
     return DataProfiler(), DataCleaner(), AnomalyDetector()
 
-profiler, cleaner, anomaly_detector = get_components()  # ← UPDATED THIS LINE
+profiler, cleaner, anomaly_detector = get_components()
 
-# Main app - UPDATED THIS
+# Main app
 def main():
     st.title("🧹 SOPAKA.AI")
     st.markdown("**Intelligent Data Cleaning with AI-Powered Strategies**")
@@ -63,7 +65,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox("Choose a page", 
                                ["Data Upload & Profiling", 
-                                "Anomaly Detection",      # ← ADDED THIS
+                                "Anomaly Detection",
                                 "Cleaning Configuration", 
                                 "Results & Download"])
     
@@ -72,14 +74,14 @@ def main():
     
     if page == "Data Upload & Profiling":
         data_upload_page()
-    elif page == "Anomaly Detection":           # ← ADDED THIS
-        anomaly_detection_page()                # ← ADDED THIS
+    elif page == "Anomaly Detection":
+        anomaly_detection_page()
     elif page == "Cleaning Configuration":
         cleaning_config_page(show_debug)
     elif page == "Results & Download":
         results_page()
 
-# ADDED THIS ENTIRE FUNCTION
+# COMPLETE ANOMALY DETECTION FUNCTION WITH WORKING BUTTONS
 def anomaly_detection_page():
     st.header("🔍 Anomaly Detection")
     
@@ -102,80 +104,99 @@ def anomaly_detection_page():
         )
     
     with col2:
-        z_threshold = st.slider("Z-Score Threshold", 2.0, 4.0, 3.0, 0.1)
+        z_threshold = st.slider("Z-Score Threshold", 1.5, 4.0, 2.5, 0.1)
     
-    if st.button("🔍 Detect Anomalies", type="primary"):
+    if st.button("🔍 Detect Anomalies", type="primary", key="detect_anomalies_btn"):
         with st.spinner("🔍 Detecting anomalies..."):
             
-            # Initialize anomaly detector if needed
-            if 'anomaly_results' not in st.session_state:
-                st.session_state['anomaly_results'] = {}
-            
-            # Statistical anomalies detection
             anomalies = {}
+            error_markers = ["ERROR", "UNKNOWN", "N/A", "NULL", "", "error", "unknown"]
             
+            # Process each column
             for column in df.columns:
-                # Only process numeric columns
-                if df[column].dtype in ['int64', 'float64']:
-                    column_anomalies = []
-                    
-                    # Clean the column first (remove non-numeric values)
-                    numeric_data = pd.to_numeric(df[column], errors='coerce')
-                    clean_data = numeric_data.dropna()
-                    
-                    if len(clean_data) == 0:
-                        continue
-                    
-                    if "Z-Score" in detection_methods:
-                        z_scores = np.abs((numeric_data - clean_data.mean()) / clean_data.std())
-                        z_outliers = df[z_scores > z_threshold].index.tolist()
-                        column_anomalies.extend(z_outliers)
-                    
-                    if "IQR" in detection_methods:
-                        Q1 = clean_data.quantile(0.25)
-                        Q3 = clean_data.quantile(0.75)
+                clean_data = df[column][~df[column].astype(str).isin(error_markers)].dropna()
+                numeric_data = pd.to_numeric(clean_data, errors='coerce')
+                valid_numeric = numeric_data.dropna()
+                
+                if len(valid_numeric) < 10:
+                    continue
+                
+                column_anomalies = []
+                
+                if "Z-Score" in detection_methods:
+                    try:
+                        z_scores = np.abs(stats.zscore(valid_numeric))
+                        z_outlier_mask = z_scores > z_threshold
+                        z_outlier_indices = valid_numeric[z_outlier_mask].index.tolist()
+                        column_anomalies.extend(z_outlier_indices)
+                    except Exception as e:
+                        st.warning(f"Z-Score analysis failed for {column}: {str(e)}")
+                
+                if "IQR" in detection_methods:
+                    try:
+                        Q1 = valid_numeric.quantile(0.25)
+                        Q3 = valid_numeric.quantile(0.75)
                         IQR = Q3 - Q1
-                        lower_bound = Q1 - 1.5 * IQR
-                        upper_bound = Q3 + 1.5 * IQR
-                        iqr_outliers = df[(numeric_data < lower_bound) | (numeric_data > upper_bound)].index.tolist()
-                        column_anomalies.extend(iqr_outliers)
-                    
-                    if "Isolation Forest" in detection_methods:
-                        try:
-                            from sklearn.ensemble import IsolationForest
-                            iso_forest = IsolationForest(contamination=0.1, random_state=42)
-                            outliers = iso_forest.fit_predict(clean_data.values.reshape(-1, 1))
-                            iso_outliers = clean_data[outliers == -1].index.tolist()
-                            column_anomalies.extend(iso_outliers)
-                        except ImportError:
-                            st.warning("⚠️ Scikit-learn not installed. Skipping Isolation Forest.")
-                    
-                    if column_anomalies:
-                        anomalies[column] = list(set(column_anomalies))
+                        
+                        if IQR > 0:
+                            lower_bound = Q1 - 1.5 * IQR
+                            upper_bound = Q3 + 1.5 * IQR
+                            iqr_outlier_mask = (valid_numeric < lower_bound) | (valid_numeric > upper_bound)
+                            iqr_outlier_indices = valid_numeric[iqr_outlier_mask].index.tolist()
+                            column_anomalies.extend(iqr_outlier_indices)
+                    except Exception as e:
+                        st.warning(f"IQR analysis failed for {column}: {str(e)}")
+                
+                if "Isolation Forest" in detection_methods:
+                    try:
+                        from sklearn.ensemble import IsolationForest
+                        iso_forest = IsolationForest(contamination=0.1, random_state=42)
+                        outliers = iso_forest.fit_predict(valid_numeric.values.reshape(-1, 1))
+                        iso_outlier_indices = valid_numeric[outliers == -1].index.tolist()
+                        column_anomalies.extend(iso_outlier_indices)
+                    except ImportError:
+                        st.warning("⚠️ Scikit-learn not installed. Skipping Isolation Forest.")
+                    except Exception as e:
+                        st.warning(f"Isolation Forest failed for {column}: {str(e)}")
+                
+                if column_anomalies:
+                    anomalies[column] = list(set(column_anomalies))
             
             # Business Rules Validation
             if "Business Rules" in detection_methods:
-                business_anomalies = []
-                
-                # Check if we have the required columns for business rule validation
+                business_violations = []
                 required_cols = ['Price Per Unit', 'Quantity', 'Total Spent']
+                
                 if all(col in df.columns for col in required_cols):
-                    
-                    for idx, row in df.iterrows():
+                    for idx in range(len(df)):
                         try:
-                            price = pd.to_numeric(row['Price Per Unit'], errors='coerce')
-                            quantity = pd.to_numeric(row['Quantity'], errors='coerce')
-                            total = pd.to_numeric(row['Total Spent'], errors='coerce')
+                            price_val = df.loc[idx, 'Price Per Unit']
+                            qty_val = df.loc[idx, 'Quantity']
+                            total_val = df.loc[idx, 'Total Spent']
+                            
+                            if any(str(val) in error_markers for val in [price_val, qty_val, total_val]):
+                                continue
+                                
+                            price = pd.to_numeric(price_val, errors='coerce')
+                            quantity = pd.to_numeric(qty_val, errors='coerce')
+                            total = pd.to_numeric(total_val, errors='coerce')
                             
                             if pd.notna(price) and pd.notna(quantity) and pd.notna(total):
                                 expected_total = price * quantity
-                                if abs(total - expected_total) > 0.01:  # Allow small rounding differences
-                                    business_anomalies.append(idx)
-                        except:
+                                if abs(total - expected_total) > 0.01:
+                                    business_violations.append({
+                                        'row': idx,
+                                        'price': float(price),
+                                        'quantity': float(quantity),
+                                        'expected_total': float(expected_total),
+                                        'actual_total': float(total),
+                                        'difference': float(abs(total - expected_total))
+                                    })
+                        except Exception:
                             continue
                     
-                    if business_anomalies:
-                        anomalies['Business Logic Violations'] = business_anomalies
+                    if business_violations:
+                        anomalies['Business Logic Violations'] = business_violations
             
             # Store results
             st.session_state['anomaly_results'] = anomalies
@@ -184,8 +205,12 @@ def anomaly_detection_page():
             st.subheader("📈 Anomaly Detection Results")
             
             if anomalies:
-                total_anomalies = sum(len(indices) for indices in anomalies.values())
+                # Calculate total anomalies
+                total_anomalies = 0
+                for key, value in anomalies.items():
+                    total_anomalies += len(value)
                 
+                # Display metrics
                 col1, col2, col3 = st.columns(3)
                 with col1:
                     st.metric("Total Anomalies", total_anomalies)
@@ -196,133 +221,302 @@ def anomaly_detection_page():
                     st.metric("Anomaly Rate", f"{anomaly_percentage:.2f}%")
                 
                 # Show anomalies by column
-                for column, indices in anomalies.items():
-                    with st.expander(f"📊 {column}: {len(indices)} anomalies", expanded=True):
-                        
-                        if len(indices) > 0:
-                            col1, col2 = st.columns(2)
+                for column, data in anomalies.items():
+                    if column == 'Business Logic Violations':
+                        with st.expander(f"💼 {column}: {len(data)} violations", expanded=True):
+                            st.write("**Sample Business Rule Violations:**")
+                            if data:
+                                violation_df = pd.DataFrame(data[:10])
+                                st.dataframe(violation_df, use_container_width=True)
+                    else:
+                        indices = data
+                        with st.expander(f"📊 {column}: {len(indices)} anomalies", expanded=True):
                             
-                            with col1:
+                            col_left, col_right = st.columns(2)
+                            
+                            with col_left:
                                 st.write("**Anomaly Statistics:**")
-                                if column != 'Business Logic Violations':
-                                    anomaly_values = df.loc[indices, column]
-                                    stats_df = pd.DataFrame({
-                                        'Statistic': ['Count', 'Mean', 'Std', 'Min', 'Max'],
-                                        'Value': [
-                                            len(anomaly_values),
-                                            f"{pd.to_numeric(anomaly_values, errors='coerce').mean():.2f}" if pd.to_numeric(anomaly_values, errors='coerce').notna().any() else 'N/A',
-                                            f"{pd.to_numeric(anomaly_values, errors='coerce').std():.2f}" if pd.to_numeric(anomaly_values, errors='coerce').notna().any() else 'N/A',
-                                            f"{pd.to_numeric(anomaly_values, errors='coerce').min():.2f}" if pd.to_numeric(anomaly_values, errors='coerce').notna().any() else 'N/A',
-                                            f"{pd.to_numeric(anomaly_values, errors='coerce').max():.2f}" if pd.to_numeric(anomaly_values, errors='coerce').notna().any() else 'N/A'
-                                        ]
-                                    })
-                                    st.dataframe(stats_df, use_container_width=True)
-                                else:
-                                    st.write(f"Found {len(indices)} business rule violations")
+                                anomaly_values = pd.to_numeric(df.loc[indices, column], errors='coerce').dropna()
+                                
+                                if len(anomaly_values) > 0:
+                                    st.write(f"**Count:** {len(anomaly_values)}")
+                                    st.write(f"**Mean:** {anomaly_values.mean():.2f}")
+                                    st.write(f"**Std:** {anomaly_values.std():.2f}")
+                                    st.write(f"**Min:** {anomaly_values.min():.2f}")
+                                    st.write(f"**Max:** {anomaly_values.max():.2f}")
+                                    
+                                    unique_anomalies = sorted(anomaly_values.unique())
+                                    st.write(f"**Unique Values:** {unique_anomalies[:10]}")
                             
-                            with col2:
-                                # Create visualization for numeric columns
-                                if column != 'Business Logic Violations' and df[column].dtype in ['int64', 'float64']:
-                                    try:
-                                        # Box plot showing outliers
-                                        fig = px.box(df, y=column, title=f"Outliers in {column}")
+                            with col_right:
+                                try:
+                                    all_numeric = pd.to_numeric(df[column], errors='coerce').dropna()
+                                    
+                                    if len(all_numeric) > 0 and len(anomaly_values) > 0:
+                                        fig = go.Figure()
                                         
-                                        # Add anomaly points
-                                        anomaly_data = df.loc[indices, column]
-                                        fig.add_scatter(
-                                            x=[0] * len(anomaly_data), 
-                                            y=pd.to_numeric(anomaly_data, errors='coerce'),
-                                            mode='markers',
-                                            marker=dict(color='red', size=10, symbol='x'),
-                                            name='Detected Anomalies',
-                                            showlegend=True
+                                        fig.add_trace(go.Histogram(
+                                            x=all_numeric,
+                                            name='All Data',
+                                            opacity=0.7,
+                                            marker_color='lightblue',
+                                            nbinsx=30
+                                        ))
+                                        
+                                        fig.add_trace(go.Histogram(
+                                            x=anomaly_values,
+                                            name='Anomalies',
+                                            marker_color='red',
+                                            opacity=0.8,
+                                            nbinsx=30
+                                        ))
+                                        
+                                        fig.update_layout(
+                                            title=f"{column} Distribution",
+                                            xaxis_title=column,
+                                            yaxis_title="Count",
+                                            height=300,
+                                            showlegend=True,
+                                            barmode='overlay'
                                         )
                                         
-                                        fig.update_layout(height=300)
                                         st.plotly_chart(fig, use_container_width=True)
-                                    except Exception as e:
-                                        st.write(f"Could not create visualization: {str(e)}")
-                                        
-                                        # Fallback: show histogram
-                                        try:
-                                            fig = px.histogram(df, x=column, title=f"Distribution of {column}")
-                                            st.plotly_chart(fig, use_container_width=True)
-                                        except:
-                                            st.write("Unable to create visualization for this column.")
+                                
+                                except Exception as e:
+                                    st.write(f"Visualization error: {str(e)}")
                             
-                            # Show sample anomalous rows
-                            if st.button(f"Show Sample Anomalous Rows for {column}", key=f"show_{column}"):
+                            if st.button(f"Show Sample Rows", key=f"show_{column}_samples"):
                                 sample_size = min(10, len(indices))
                                 sample_indices = indices[:sample_size]
-                                st.write(f"**Sample of {sample_size} anomalous rows:**")
+                                st.write("**Sample Anomalous Rows:**")
                                 st.dataframe(df.loc[sample_indices], use_container_width=True)
                 
-                # Anomaly handling options
-                st.subheader("🔧 Anomaly Handling Options")
+                # FIXED HANDLING BUTTONS WITH PROPER CALLBACKS
+                st.subheader("🔧 Anomaly Handling")
                 
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    if st.button("📥 Export Anomaly Report", use_container_width=True):
-                        # Create anomaly report
-                        anomaly_report = {
-                            'detection_summary': {
-                                'total_anomalies': total_anomalies,
-                                'affected_columns': len(anomalies),
-                                'anomaly_rate': f"{anomaly_percentage:.2f}%",
-                                'detection_methods': detection_methods
-                            },
-                            'anomalies_by_column': {}
-                        }
-                        
-                        for column, indices in anomalies.items():
-                            anomaly_report['anomalies_by_column'][column] = {
-                                'count': len(indices),
-                                'indices': indices,
-                                'sample_values': df.loc[indices[:5], column].tolist() if column != 'Business Logic Violations' else []
+                    # Export Report Button with immediate callback
+                    export_report = st.button("📊 Export Report", use_container_width=True, key="export_report_btn")
+                    
+                    if export_report:
+                        try:
+                            anomaly_report = {
+                                'summary': {
+                                    'total_anomalies': total_anomalies,
+                                    'affected_columns': len(anomalies),
+                                    'methods_used': detection_methods,
+                                    'z_threshold': float(z_threshold),
+                                    'anomaly_rate': f"{anomaly_percentage:.2f}%",
+                                    'dataset_size': len(df)
+                                },
+                                'anomalies_by_column': {}
                             }
-                        
-                        import json
-                        report_json = json.dumps(anomaly_report, indent=2, default=str)
-                        st.download_button(
-                            label="📥 Download Anomaly Report (JSON)",
-                            data=report_json,
-                            file_name="anomaly_report.json",
-                            mime="application/json"
-                        )
+                            
+                            for column, data in anomalies.items():
+                                if column == 'Business Logic Violations':
+                                    anomaly_report['anomalies_by_column'][column] = {
+                                        'type': 'business_violations',
+                                        'count': len(data),
+                                        'sample_violations': data[:5]
+                                    }
+                                else:
+                                    sample_values = []
+                                    if len(data) > 0:
+                                        try:
+                                            sample_vals = df.loc[data[:5], column]
+                                            sample_values = [float(x) for x in pd.to_numeric(sample_vals, errors='coerce').dropna()]
+                                        except:
+                                            sample_values = []
+                                    
+                                    anomaly_report['anomalies_by_column'][column] = {
+                                        'type': 'statistical_outliers',
+                                        'count': len(data),
+                                        'sample_indices': data[:10],
+                                        'sample_values': sample_values
+                                    }
+                            
+                            report_json = json.dumps(anomaly_report, indent=2, default=str)
+                            
+                            st.download_button(
+                                label="📥 Download Anomaly Report (JSON)",
+                                data=report_json,
+                                file_name="anomaly_report.json",
+                                mime="application/json",
+                                key="download_anomaly_report"
+                            )
+                            
+                            st.success("✅ Anomaly report generated successfully!")
+                            
+                        except Exception as e:
+                            st.error(f"Error generating report: {str(e)}")
                 
                 with col2:
-                    if st.button("🗑️ Remove Anomalous Rows", use_container_width=True):
-                        all_anomaly_indices = set()
-                        for indices in anomalies.values():
-                            all_anomaly_indices.update(indices)
-                        
-                        cleaned_df = df.drop(list(all_anomaly_indices))
-                        st.session_state['anomaly_cleaned_df'] = cleaned_df
-                        st.success(f"✅ Removed {len(all_anomaly_indices)} anomalous rows. Dataset size: {len(df)} → {len(cleaned_df)}")
+                    # Remove Anomalies Button with immediate callback
+                    remove_anomalies = st.button("🗑️ Remove Anomalies", use_container_width=True, key="remove_anomalies_btn")
+                    
+                    if remove_anomalies:
+                        try:
+                            all_indices = set()
+                            
+                            for column, data in anomalies.items():
+                                if column == 'Business Logic Violations':
+                                    violation_indices = [v['row'] for v in data if isinstance(v, dict) and 'row' in v]
+                                    all_indices.update(violation_indices)
+                                else:
+                                    all_indices.update(data)
+                            
+                            if all_indices:
+                                # Remove anomalous rows
+                                cleaned_df = df.drop(list(all_indices))
+                                st.session_state['anomaly_cleaned_df'] = cleaned_df
+                                
+                                # Show success message with details
+                                st.success(f"✅ Successfully removed {len(all_indices)} anomalous rows!")
+                                
+                                # Show impact metrics
+                                removal_percentage = (len(all_indices) / len(df)) * 100
+                                st.info(f"""
+                                **Removal Impact:**
+                                • Original size: {len(df):,} rows
+                                • Cleaned size: {len(cleaned_df):,} rows  
+                                • Removed: {len(all_indices):,} rows ({removal_percentage:.1f}%)
+                                """)
+                                
+                                # Show sample of removed data
+                                if st.checkbox("Preview removed data", key="preview_removed"):
+                                    removed_sample = df.loc[list(all_indices)].head()
+                                    st.write("**Sample of removed anomalous data:**")
+                                    st.dataframe(removed_sample, use_container_width=True)
+                                
+                                # Offer to download cleaned data
+                                cleaned_csv = cleaned_df.to_csv(index=False)
+                                st.download_button(
+                                    label="📥 Download Cleaned Dataset",
+                                    data=cleaned_csv,
+                                    file_name="cleaned_dataset_no_anomalies.csv",
+                                    mime="text/csv",
+                                    key="download_cleaned_no_anomalies"
+                                )
+                            else:
+                                st.warning("No anomalous rows found to remove.")
+                                
+                        except Exception as e:
+                            st.error(f"Error removing anomalies: {str(e)}")
                 
                 with col3:
-                    if st.button("🏷️ Flag Anomalies", use_container_width=True):
-                        flagged_df = df.copy()
-                        flagged_df['anomaly_flag'] = False
-                        
-                        all_anomaly_indices = set()
-                        for indices in anomalies.values():
-                            all_anomaly_indices.update(indices)
-                        
-                        flagged_df.loc[list(all_anomaly_indices), 'anomaly_flag'] = True
-                        st.session_state['flagged_df'] = flagged_df
-                        st.success(f"✅ Flagged {len(all_anomaly_indices)} rows as anomalous")
-                
+                    # Flag Anomalies Button with immediate callback
+                    flag_anomalies = st.button("🏷️ Flag Anomalies", use_container_width=True, key="flag_anomalies_btn")
+                    
+                    if flag_anomalies:
+                        try:
+                            flagged_df = df.copy()
+                            flagged_df['is_anomaly'] = False
+                            flagged_df['anomaly_type'] = ''
+                            flagged_df['anomaly_column'] = ''
+                            flagged_df['anomaly_method'] = ''
+                            
+                            total_flagged = 0
+                            
+                            for column, data in anomalies.items():
+                                if column == 'Business Logic Violations':
+                                    violation_indices = [v['row'] for v in data if isinstance(v, dict) and 'row' in v]
+                                    if violation_indices:
+                                        flagged_df.loc[violation_indices, 'is_anomaly'] = True
+                                        flagged_df.loc[violation_indices, 'anomaly_type'] = 'Business Rule Violation'
+                                        flagged_df.loc[violation_indices, 'anomaly_column'] = 'Multiple Columns'
+                                        flagged_df.loc[violation_indices, 'anomaly_method'] = 'Business Rules'
+                                        total_flagged += len(violation_indices)
+                                else:
+                                    if data:
+                                        flagged_df.loc[data, 'is_anomaly'] = True
+                                        flagged_df.loc[data, 'anomaly_type'] = 'Statistical Outlier'
+                                        flagged_df.loc[data, 'anomaly_column'] = column
+                                        
+                                        # Determine which method detected it
+                                        methods_used = []
+                                        if "Z-Score" in detection_methods:
+                                            methods_used.append("Z-Score")
+                                        if "IQR" in detection_methods:
+                                            methods_used.append("IQR")
+                                        if "Isolation Forest" in detection_methods:
+                                            methods_used.append("Isolation Forest")
+                                        
+                                        flagged_df.loc[data, 'anomaly_method'] = ", ".join(methods_used)
+                                        total_flagged += len(data)
+                            
+                            st.session_state['flagged_df'] = flagged_df
+                            
+                            st.success(f"✅ Successfully flagged {total_flagged} rows as anomalous!")
+                            
+                            # Show flagging statistics
+                            flag_percentage = (total_flagged / len(df)) * 100
+                            st.info(f"""
+                            **Flagging Results:**
+                            • Total rows: {len(df):,}
+                            • Flagged as anomalous: {total_flagged:,} ({flag_percentage:.1f}%)
+                            • Normal rows: {len(df) - total_flagged:,} ({100 - flag_percentage:.1f}%)
+                            """)
+                            
+                            # Show preview of flagged data
+                            if st.checkbox("Preview flagged data", key="preview_flagged"):
+                                flagged_preview = flagged_df[flagged_df['is_anomaly'] == True].head()
+                                st.write("**Sample of flagged anomalous data:**")
+                                display_columns = ['Transaction ID', 'Total Spent', 'is_anomaly', 'anomaly_type', 'anomaly_column', 'anomaly_method']
+                                available_columns = [col for col in display_columns if col in flagged_preview.columns]
+                                st.dataframe(flagged_preview[available_columns], use_container_width=True)
+                            
+                            # Offer to download flagged data
+                            flagged_csv = flagged_df.to_csv(index=False)
+                            st.download_button(
+                                label="📥 Download Flagged Dataset",
+                                data=flagged_csv,
+                                file_name="dataset_with_anomaly_flags.csv",
+                                mime="text/csv",
+                                key="download_flagged_dataset"
+                            )
+                            
+                        except Exception as e:
+                            st.error(f"Error flagging anomalies: {str(e)}")
+            
             else:
                 st.success("✅ No anomalies detected in the dataset!")
-                st.info("This could mean your data is very clean, or you might want to try different detection methods or adjust thresholds.")
+                st.info(f"""
+                **Possible reasons:**
+                • Your data is very clean and well-distributed
+                • Z-Score threshold ({z_threshold}) might be too high
+                • Try lowering the threshold to {z_threshold-0.5:.1f}
+                • Consider using different detection methods
+                """)
+                
+                # Show data distribution for context
+                st.write("**Data Distribution Analysis:**")
+                numeric_cols = []
+                for col in df.columns:
+                    if pd.to_numeric(df[col], errors='coerce').notna().sum() > 10:
+                        numeric_cols.append(col)
+                
+                if numeric_cols:
+                    selected_col = st.selectbox("Select column to analyze:", numeric_cols)
+                    if selected_col:
+                        clean_data = pd.to_numeric(df[selected_col], errors='coerce').dropna()
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write(f"**{selected_col} Statistics:**")
+                            st.write(f"Mean: {clean_data.mean():.2f}")
+                            st.write(f"Std: {clean_data.std():.2f}")
+                            st.write(f"Min: {clean_data.min():.2f}")
+                            st.write(f"Max: {clean_data.max():.2f}")
+                        
+                        with col2:
+                            fig = px.histogram(x=clean_data, title=f"Distribution of {selected_col}", nbins=30)
+                            st.plotly_chart(fig, use_container_width=True)
 
-# Your existing functions remain the same...
 def data_upload_page():
     st.header("📁 Data Upload & Profiling")
     
-    # File upload
     uploaded_file = st.file_uploader(
         "Upload your dataset (CSV or Excel)",
         type=['csv', 'xlsx', 'xls'],
@@ -330,7 +524,6 @@ def data_upload_page():
     )
     
     if uploaded_file:
-        # Load data
         try:
             if uploaded_file.name.endswith('.csv'):
                 df = pd.read_csv(uploaded_file)
@@ -340,11 +533,9 @@ def data_upload_page():
             st.session_state['original_df'] = df
             st.success(f"✅ Dataset loaded successfully! Shape: {df.shape}")
             
-            # Display sample data
             st.subheader("📊 Data Preview")
             st.dataframe(df.head(10), use_container_width=True)
             
-            # Generate and display profile
             with st.spinner("🔍 Analyzing data quality..."):
                 profile = profiler.profile_dataset(df)
                 st.session_state['profile'] = profile
@@ -357,7 +548,6 @@ def data_upload_page():
 def display_data_profile(profile):
     st.subheader("📈 Data Quality Analysis")
     
-    # Overall stats
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
@@ -371,7 +561,6 @@ def display_data_profile(profile):
         total_nulls = sum([col['null_count'] + col['error_count'] for col in profile['column_profiles'].values()])
         st.metric("Total Issues", total_nulls)
     
-    # Column-wise analysis
     st.subheader("🔍 Column Analysis")
     
     column_data = []
@@ -389,7 +578,6 @@ def display_data_profile(profile):
     column_df = pd.DataFrame(column_data)
     st.dataframe(column_df, use_container_width=True)
     
-    # Quality visualization
     fig = px.bar(
         column_df, 
         x='Column', 
@@ -412,30 +600,26 @@ def cleaning_config_page(show_debug=False):
     
     st.subheader("🔧 Configure Cleaning Strategies")
     
-    # Warning for large datasets with LLM
     total_issues = sum([profile.get('column_profiles', {}).get(col, {}).get('null_count', 0) + 
                        profile.get('column_profiles', {}).get(col, {}).get('error_count', 0) 
                        for col in df.columns])
     
     if total_issues > 1000:
-        st.warning(f"⚠️ Large dataset detected ({total_issues:,} issues). LLM predictions may take significant time and cost. Consider using statistical methods for large missing value counts.")
+        st.warning(f"⚠️ Large dataset detected ({total_issues:,} issues). LLM predictions may take significant time and cost.")
     
     cleaning_strategies = {}
     
-    # Create configuration for each column
     for column in df.columns:
         st.write(f"**{column}**")
         col_profile = profile.get('column_profiles', {}).get(column, {})
         data_type = col_profile.get('data_type', 'unknown')
         recommended = col_profile.get('recommended_strategy', 'Mode Imputation')
         
-        # Get available strategies based on data type
         if data_type == 'quantitative':
             strategies = config['cleaning_strategies']['quantitative']
         else:
             strategies = config['cleaning_strategies']['qualitative']
         
-        # Strategy selection
         col1, col2, col3 = st.columns([2, 1, 1])
         
         with col1:
@@ -447,10 +631,9 @@ def cleaning_config_page(show_debug=False):
             )
             cleaning_strategies[column] = strategy
             
-            # Show warning for LLM with many missing values
             issues = col_profile.get('null_count', 0) + col_profile.get('error_count', 0)
             if 'LLM' in strategy and issues > 50:
-                st.caption(f"⚠️ {issues} missing values - will be limited to 50 LLM calls for performance")
+                st.caption(f"⚠️ {issues} missing values - will be limited to 50 LLM calls")
         
         with col2:
             st.metric("Quality", f"{col_profile.get('data_quality', 0):.1f}%")
@@ -461,18 +644,15 @@ def cleaning_config_page(show_debug=False):
         
         st.divider()
     
-    # Action buttons
     col1, col2 = st.columns(2)
     
     with col1:
         if st.button("🧹 Start Cleaning", type="primary", use_container_width=True):
             
-            # Initialize session state for progress tracking
             st.session_state['cleaning_progress'] = 0.0
             st.session_state['llm_progress'] = 0.0
             st.session_state['debug_logs'] = []
             
-            # Create progress placeholders
             progress_container = st.container()
             debug_container = st.container()
             
@@ -482,36 +662,29 @@ def cleaning_config_page(show_debug=False):
                 llm_progress = st.progress(0)
                 status_text = st.empty()
             
-            # Debug logs container
             if show_debug:
                 with debug_container:
                     st.write("🐛 **Debug Logs**")
                     debug_log = st.empty()
             
-            # Redirect stdout to capture prints
             old_stdout = sys.stdout
             sys.stdout = StreamlitCapture()
             
             try:
                 with st.spinner("🔄 Cleaning data..."):
                     
-                    # Update status
                     status_text.text("Initializing cleaning process...")
                     
-                    # Start cleaning
                     cleaned_df = cleaner.clean_dataset(df, cleaning_strategies)
                     st.session_state['cleaned_df'] = cleaned_df
                     st.session_state['cleaning_strategies'] = cleaning_strategies
                     
-                    # Update progress
                     main_progress.progress(0.8)
                     status_text.text("Generating cleaning report...")
                     
-                    # Generate report
                     report = cleaner.generate_cleaning_report(df, cleaned_df)
                     st.session_state['cleaning_report'] = report
                     
-                    # Complete
                     main_progress.progress(1.0)
                     llm_progress.progress(1.0)
                     status_text.text("✅ Cleaning completed successfully!")
@@ -524,10 +697,8 @@ def cleaning_config_page(show_debug=False):
                 if show_debug:
                     st.exception(e)
             finally:
-                # Restore stdout
                 sys.stdout = old_stdout
                 
-                # Show debug logs
                 if show_debug and 'debug_logs' in st.session_state:
                     with debug_container:
                         debug_text = "\n".join(st.session_state['debug_logs'])
@@ -548,7 +719,6 @@ def results_page():
     cleaned_df = st.session_state['cleaned_df']
     report = st.session_state.get('cleaning_report', {})
     
-    # Results comparison
     st.subheader("📈 Before vs After Comparison")
     
     col1, col2 = st.columns(2)
@@ -561,7 +731,6 @@ def results_page():
         st.write("**Cleaned Dataset**")
         st.dataframe(cleaned_df.head(), use_container_width=True)
     
-    # Improvement metrics
     if report:
         st.subheader("📊 Quality Improvements")
         
@@ -577,7 +746,6 @@ def results_page():
         improvements_df = pd.DataFrame(improvements_data)
         st.dataframe(improvements_df, use_container_width=True)
         
-        # Visualization
         fig = go.Figure(data=[
             go.Bar(name='Original', x=improvements_df['Column'], y=improvements_df['Original Quality (%)']),
             go.Bar(name='Cleaned', x=improvements_df['Column'], y=improvements_df['Final Quality (%)'])
@@ -585,13 +753,11 @@ def results_page():
         fig.update_layout(barmode='group', title='Data Quality: Before vs After')
         st.plotly_chart(fig, use_container_width=True)
     
-    # Download section
     st.subheader("💾 Download Results")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        # Download cleaned dataset
         csv = cleaned_df.to_csv(index=False)
         st.download_button(
             label="📥 Download Cleaned Dataset (CSV)",
@@ -602,9 +768,7 @@ def results_page():
         )
     
     with col2:
-        # Download cleaning report
         if report:
-            import json
             report_json = json.dumps(report, indent=2, default=str)
             st.download_button(
                 label="📥 Download Cleaning Report (JSON)",
