@@ -1,0 +1,30 @@
+# LLM Configuration
+llm:
+  model: "gpt-3.5-turbo"
+  temperature: 0.1
+  max_tokens: 500
+
+# Data Cleaning Strategies
+cleaning_strategies:
+  quantitative:
+    - "Mean Imputation"
+    - "Median Imputation" 
+    - "Mode Imputation"
+    - "Forward Fill"
+    - "Backward Fill"
+    - "LLM Prediction"
+  
+  qualitative:
+    - "Mode Imputation"
+    - "LLM Context Prediction"
+    - "Forward Fill"
+    - "Backward Fill"
+    - "Remove Rows"
+
+# Error markers to detect
+error_markers:
+  - "ERROR"
+  - "UNKNOWN"
+  - "N/A"
+  - "NULL"
+  - ""
