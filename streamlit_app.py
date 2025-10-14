@@ -12,7 +12,7 @@ from io import StringIO
 
 # Page config
 st.set_page_config(
-    page_title="RAG Data Cleaning System",
+    page_title="SOPAKA.AI",
     page_icon="🧹",
     layout="wide"
 )
@@ -55,7 +55,7 @@ profiler, cleaner = get_components()
 
 # Main app
 def main():
-    st.title("🧹 RAG Data Cleaning System")
+    st.title("🧹 SOPAKA.AI")
     st.markdown("**Intelligent Data Cleaning with AI-Powered Strategies**")
     
     # Sidebar for navigation
